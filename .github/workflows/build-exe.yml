@@ -1,0 +1,33 @@
+name: Gerar executável Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar PyInstaller
+        run: pip install pyinstaller
+      - name: Gerar .exe
+        run: pyinstaller --onefile --windowed --name BuscadorPublicacoesOAB buscador_publicacoes.py
+      - name: Disponibilizar como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuscadorPublicacoesOAB
+          path: dist/BuscadorPublicacoesOAB.exe
+      - name: Publicar na página de Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Buscador de Publicações OAB v1.0.${{ github.run_number }}
+          files: dist/BuscadorPublicacoesOAB.exe
