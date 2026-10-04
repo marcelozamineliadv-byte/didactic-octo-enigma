@@ -17,18 +17,22 @@ O executável é gerado automaticamente pelo GitHub Actions a cada atualização
 
 ## Funcionalidades
 
+O app abre em uma janela própria (usa o Microsoft Edge, que já vem no Windows, em modo aplicativo — nada a instalar).
+
 - Busca por OAB + UF e período (atalhos: Hoje, 7, 30 e 90 dias); já busca ao abrir.
-- Lista com data, tribunal, processo, tipo, órgão e partes; clique para ler o **teor completo**.
-- Publicações **não lidas em negrito** (o app lembra o que você já abriu).
-- Filtro por palavra (nome da parte, nº do processo, vara...) e opção "somente não lidas".
-- Abrir o documento original (duplo clique) e copiar o teor.
-- Exportar para **Excel (CSV)** ou **HTML** (imprima em PDF pelo navegador com Ctrl+P).
-- Lembra a OAB, a UF e o período usados.
+- Lista agrupada por dia (Hoje, Ontem, …) com tribunal, tipo, processo, vara e partes.
+- Painel de leitura com o **teor completo**, dados do processo e **alerta de prazo** quando o texto menciona um (ex.: "15 dias úteis").
+- Publicações **não lidas** marcadas com um ponto azul; o app lembra o que você já abriu.
+- Filtro instantâneo (Ctrl+K) por parte, processo, vara ou texto, com destaque do termo; filtros por tribunal e "não lidas".
+- Navegação pelo teclado (↑ ↓, Enter abre o documento).
+- Copiar teor ou nº do processo, abrir o documento original.
+- Exportar para **Excel** e **Imprimir / salvar em PDF**.
+- Tema claro e escuro.
 
 ## Rodar sem o .exe (com Python)
 
 ```
-python buscador_publicacoes.py                 # janela
+python buscador_publicacoes.py                 # abre o app
 python buscador_publicacoes.py --cli --dias 30 # no terminal
 python buscador_publicacoes.py --cli --inicio 01/09/2026 --fim 30/09/2026 --csv saida.csv
 ```

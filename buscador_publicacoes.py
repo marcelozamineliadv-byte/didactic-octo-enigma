@@ -6,7 +6,7 @@ Consulta o DJEN (Diário de Justiça Eletrônico Nacional / Comunica PJe - CNJ)
 pela API pública e lista as publicações/intimações vinculadas a uma OAB.
 
 Uso:
-    python buscador_publicacoes.py            -> abre a janela (interface gráfica)
+    python buscador_publicacoes.py            -> abre a janela do aplicativo
     python buscador_publicacoes.py --cli      -> busca no terminal (últimos 7 dias)
     python buscador_publicacoes.py --cli --inicio 2026-09-01 --fim 2026-09-30
 
@@ -19,6 +19,8 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -27,10 +29,10 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NOME = "Buscador de Publicações OAB"
 API_URL = "https://comunicaapi.pje.jus.br/api/v1/comunicacao"
-CONSULTA_WEB = "https://comunica.pje.jus.br/consulta"
 ITENS_POR_PAGINA = 100
 
 OAB_PADRAO = "517745"
@@ -246,30 +248,8 @@ def exportar_csv(publicacoes, caminho):
             w.writerow([p.get(chave, "") for chave, _ in COLUNAS_EXPORT])
 
 
-def exportar_html(publicacoes, caminho, titulo):
-    blocos = []
-    for p in publicacoes:
-        link = f'<a href="{html.escape(p["link"])}">documento</a>' if p["link"] else ""
-        blocos.append(f"""
-<div class="pub">
-  <h3>{html.escape(p['data'])} &middot; {html.escape(p['tribunal'])} &middot; {html.escape(p['processo'])}</h3>
-  <p class="meta">{html.escape(p['tipo'])} {html.escape(p['documento'])} &middot; {html.escape(p['orgao'])}<br>
-  {html.escape(p['classe'])}<br>Partes: {html.escape(p['partes'])} {link}</p>
-  <pre>{html.escape(p['texto'])}</pre>
-</div>""")
-    conteudo = f"""<!doctype html><html lang="pt-br"><head><meta charset="utf-8">
-<title>{html.escape(titulo)}</title>
-<style>body{{font-family:Segoe UI,Arial,sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#222}}
-.pub{{border:1px solid #ccc;border-radius:6px;padding:12px 16px;margin:14px 0}}
-h3{{margin:0 0 6px;font-size:16px}}.meta{{color:#555;font-size:13px;margin:0 0 8px}}
-pre{{white-space:pre-wrap;font-family:inherit;font-size:14px;margin:0}}</style></head>
-<body><h1>{html.escape(titulo)}</h1><p>{len(publicacoes)} publicação(ões).</p>{''.join(blocos)}</body></html>"""
-    with open(caminho, "w", encoding="utf-8") as f:
-        f.write(conteudo)
-
-
 # --------------------------------------------------------------------------
-# Interface gráfica (Tkinter)
+# Interface (página local aberta como janela de aplicativo no Edge/Chrome)
 # --------------------------------------------------------------------------
 
 def _parse_data(texto):
@@ -282,270 +262,140 @@ def _parse_data(texto):
     raise ErroConsulta(f"Data inválida: '{texto}'. Use o formato DD/MM/AAAA.")
 
 
-def iniciar_gui():
-    import tkinter as tk
-    from tkinter import ttk, messagebox, filedialog
+def _recurso(nome):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, nome)
 
-    cfg = carregar_config()
-    lidas = carregar_lidas()
-    estado = {"pubs": [], "filtradas": []}
 
-    root = tk.Tk()
-    root.title(APP_NOME)
-    root.geometry("1150x720")
-    root.minsize(900, 560)
-    try:
-        ttk.Style().theme_use("vista" if sys.platform == "win32" else "clam")
-    except tk.TclError:
-        pass
+def criar_servidor(porta=0):
+    """Servidor HTTP local que entrega a interface e a API usada por ela."""
+    estado = {"ultimo_ping": time.time()}
 
-    # ---- Barra de busca ----
-    topo = ttk.Frame(root, padding=(10, 10, 10, 4))
-    topo.pack(fill="x")
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
 
-    ttk.Label(topo, text="OAB nº").grid(row=0, column=0, sticky="w")
-    var_oab = tk.StringVar(value=cfg["oab"])
-    ttk.Entry(topo, textvariable=var_oab, width=10).grid(row=0, column=1, padx=(4, 10))
+        def _responder(self, codigo, corpo, tipo="application/json; charset=utf-8"):
+            if not isinstance(corpo, bytes):
+                corpo = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+            self.send_response(codigo)
+            self.send_header("Content-Type", tipo)
+            self.send_header("Content-Length", str(len(corpo)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(corpo)
 
-    ttk.Label(topo, text="UF").grid(row=0, column=2, sticky="w")
-    var_uf = tk.StringVar(value=cfg["uf"])
-    ttk.Combobox(topo, textvariable=var_uf, values=UFS, width=4, state="readonly").grid(row=0, column=3, padx=(4, 10))
-
-    hoje = date.today()
-    ttk.Label(topo, text="De").grid(row=0, column=4, sticky="w")
-    var_ini = tk.StringVar(value=(hoje - timedelta(days=int(cfg.get("dias", 7)))).strftime("%d/%m/%Y"))
-    ttk.Entry(topo, textvariable=var_ini, width=11).grid(row=0, column=5, padx=(4, 10))
-
-    ttk.Label(topo, text="Até").grid(row=0, column=6, sticky="w")
-    var_fim = tk.StringVar(value=hoje.strftime("%d/%m/%Y"))
-    ttk.Entry(topo, textvariable=var_fim, width=11).grid(row=0, column=7, padx=(4, 10))
-
-    atalhos = ttk.Frame(topo)
-    atalhos.grid(row=0, column=8, padx=(0, 10))
-
-    def periodo(dias):
-        var_ini.set((date.today() - timedelta(days=dias)).strftime("%d/%m/%Y"))
-        var_fim.set(date.today().strftime("%d/%m/%Y"))
-
-    for rotulo, dias in (("Hoje", 0), ("7 dias", 7), ("30 dias", 30), ("90 dias", 90)):
-        ttk.Button(atalhos, text=rotulo, width=7, command=lambda d=dias: periodo(d)).pack(side="left", padx=1)
-
-    btn_buscar = ttk.Button(topo, text="🔎 Buscar")
-    btn_buscar.grid(row=0, column=9, padx=(0, 4))
-
-    # ---- Filtro e ações ----
-    barra = ttk.Frame(root, padding=(10, 2, 10, 6))
-    barra.pack(fill="x")
-    ttk.Label(barra, text="Filtrar resultados:").pack(side="left")
-    var_filtro = tk.StringVar()
-    ttk.Entry(barra, textvariable=var_filtro, width=40).pack(side="left", padx=6)
-    var_so_novas = tk.BooleanVar(value=False)
-    ttk.Checkbutton(barra, text="Somente não lidas", variable=var_so_novas,
-                    command=lambda: aplicar_filtro()).pack(side="left", padx=6)
-    btn_html = ttk.Button(barra, text="Exportar HTML/PDF")
-    btn_html.pack(side="right", padx=2)
-    btn_csv = ttk.Button(barra, text="Exportar Excel (CSV)")
-    btn_csv.pack(side="right", padx=2)
-    btn_lidas = ttk.Button(barra, text="Marcar todas como lidas")
-    btn_lidas.pack(side="right", padx=2)
-
-    # ---- Tabela + detalhe ----
-    painel = ttk.PanedWindow(root, orient="vertical")
-    painel.pack(fill="both", expand=True, padx=10)
-
-    quadro_tab = ttk.Frame(painel)
-    colunas = ("data", "tribunal", "processo", "tipo", "orgao", "partes")
-    titulos = {"data": "Data", "tribunal": "Tribunal", "processo": "Processo",
-               "tipo": "Tipo", "orgao": "Órgão", "partes": "Partes"}
-    larguras = {"data": 85, "tribunal": 70, "processo": 190, "tipo": 110, "orgao": 260, "partes": 380}
-    tabela = ttk.Treeview(quadro_tab, columns=colunas, show="headings", selectmode="browse")
-    for c in colunas:
-        tabela.heading(c, text=titulos[c], command=lambda c=c: ordenar(c))
-        tabela.column(c, width=larguras[c], anchor="w", stretch=(c in ("orgao", "partes")))
-    tabela.tag_configure("nova", font=("Segoe UI", 9, "bold"))
-    sb = ttk.Scrollbar(quadro_tab, orient="vertical", command=tabela.yview)
-    tabela.configure(yscrollcommand=sb.set)
-    tabela.pack(side="left", fill="both", expand=True)
-    sb.pack(side="right", fill="y")
-    painel.add(quadro_tab, weight=3)
-
-    quadro_det = ttk.Frame(painel)
-    acoes_det = ttk.Frame(quadro_det)
-    acoes_det.pack(fill="x", pady=(6, 2))
-    lbl_det = ttk.Label(acoes_det, text="Selecione uma publicação para ver o teor.", font=("Segoe UI", 9, "bold"))
-    lbl_det.pack(side="left")
-    btn_doc = ttk.Button(acoes_det, text="Abrir documento", state="disabled")
-    btn_doc.pack(side="right", padx=2)
-    btn_copiar = ttk.Button(acoes_det, text="Copiar teor", state="disabled")
-    btn_copiar.pack(side="right", padx=2)
-    txt = tk.Text(quadro_det, wrap="word", height=12, font=("Segoe UI", 10), padx=8, pady=6)
-    sb2 = ttk.Scrollbar(quadro_det, orient="vertical", command=txt.yview)
-    txt.configure(yscrollcommand=sb2.set, state="disabled")
-    txt.pack(side="left", fill="both", expand=True)
-    sb2.pack(side="right", fill="y")
-    painel.add(quadro_det, weight=2)
-
-    var_status = tk.StringVar(value="Pronto. Fonte: DJEN / Comunica PJe (CNJ).")
-    ttk.Label(root, textvariable=var_status, relief="sunken", anchor="w", padding=(8, 3)).pack(fill="x", side="bottom")
-
-    # ---- Lógica ----
-    def preencher_tabela():
-        tabela.delete(*tabela.get_children())
-        for i, p in enumerate(estado["filtradas"]):
-            tags = () if p["id"] in lidas else ("nova",)
-            tabela.insert("", "end", iid=str(i), values=[p[c] for c in colunas], tags=tags)
-        novas = sum(1 for p in estado["pubs"] if p["id"] not in lidas)
-        var_status.set(f"{len(estado['filtradas'])} exibida(s) de {len(estado['pubs'])} encontrada(s) "
-                       f"· {novas} não lida(s) (em negrito)")
-
-    def aplicar_filtro(*_):
-        termo = var_filtro.get().strip().lower()
-        estado["filtradas"] = [
-            p for p in estado["pubs"]
-            if (not termo or termo in " ".join(str(v) for v in p.values()).lower())
-            and (not var_so_novas.get() or p["id"] not in lidas)
-        ]
-        preencher_tabela()
-
-    var_filtro.trace_add("write", aplicar_filtro)
-
-    ordem = {"col": None, "rev": False}
-
-    def ordenar(col):
-        ordem["rev"] = not ordem["rev"] if ordem["col"] == col else False
-        ordem["col"] = col
-
-        def chave(p):
-            if col == "data":
-                try:
-                    return datetime.strptime(p["data"], "%d/%m/%Y")
-                except ValueError:
-                    return datetime.min
-            return str(p[col]).lower()
-        estado["filtradas"].sort(key=chave, reverse=ordem["rev"])
-        preencher_tabela()
-
-    def selecionada():
-        sel = tabela.selection()
-        return estado["filtradas"][int(sel[0])] if sel else None
-
-    def ao_selecionar(_=None):
-        p = selecionada()
-        if not p:
-            return
-        txt.configure(state="normal")
-        txt.delete("1.0", "end")
-        cab = (f"Processo: {p['processo']}   |   Tribunal: {p['tribunal']}   |   Data: {p['data']}\n"
-               f"Tipo: {p['tipo']} {p['documento']}   |   Classe: {p['classe']}\n"
-               f"Órgão: {p['orgao']}\nPartes: {p['partes']}\nAdvogados: {p['advogados']}\n"
-               + "─" * 90 + "\n\n")
-        txt.insert("1.0", cab + (p["texto"] or "(sem teor disponível)"))
-        txt.configure(state="disabled")
-        lbl_det.configure(text=f"Teor — {p['processo']}")
-        btn_copiar.configure(state="normal")
-        btn_doc.configure(state="normal" if p["link"] else "disabled")
-        if p["id"] not in lidas:
-            lidas.add(p["id"])
-            salvar_lidas(lidas)
-            tabela.item(tabela.selection()[0], tags=())
-
-    tabela.bind("<<TreeviewSelect>>", ao_selecionar)
-
-    def copiar():
-        p = selecionada()
-        if p:
-            root.clipboard_clear()
-            root.clipboard_append(f"Processo {p['processo']} ({p['tribunal']}) - {p['data']}\n\n{p['texto']}")
-            var_status.set("Teor copiado para a área de transferência.")
-
-    def abrir_doc():
-        p = selecionada()
-        if p and p["link"]:
-            webbrowser.open(p["link"])
-
-    btn_copiar.configure(command=copiar)
-    btn_doc.configure(command=abrir_doc)
-    tabela.bind("<Double-1>", lambda _: abrir_doc())
-
-    def marcar_todas():
-        for p in estado["pubs"]:
-            lidas.add(p["id"])
-        salvar_lidas(lidas)
-        aplicar_filtro()
-
-    btn_lidas.configure(command=marcar_todas)
-
-    def nome_base():
-        oab = re.sub(r"\D", "", var_oab.get())
-        return f"publicacoes_OAB{oab}{var_uf.get()}_{date.today():%Y-%m-%d}"
-
-    def exp_csv():
-        if not estado["filtradas"]:
-            messagebox.showinfo(APP_NOME, "Não há publicações para exportar.")
-            return
-        caminho = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=nome_base() + ".csv",
-                                               filetypes=[("Planilha CSV (Excel)", "*.csv")])
-        if caminho:
-            exportar_csv(estado["filtradas"], caminho)
-            var_status.set(f"Exportado: {caminho}")
-
-    def exp_html():
-        if not estado["filtradas"]:
-            messagebox.showinfo(APP_NOME, "Não há publicações para exportar.")
-            return
-        caminho = filedialog.asksaveasfilename(defaultextension=".html", initialfile=nome_base() + ".html",
-                                               filetypes=[("Página HTML", "*.html")])
-        if caminho:
-            titulo = f"Publicações OAB {var_oab.get()}/{var_uf.get()} — {var_ini.get()} a {var_fim.get()}"
-            exportar_html(estado["filtradas"], caminho, titulo)
-            webbrowser.open("file://" + os.path.abspath(caminho))
-            var_status.set(f"Exportado: {caminho} (use Ctrl+P no navegador para salvar em PDF)")
-
-    btn_csv.configure(command=exp_csv)
-    btn_html.configure(command=exp_html)
-
-    def buscar():
-        try:
-            inicio, fim = _parse_data(var_ini.get()), _parse_data(var_fim.get())
-        except ErroConsulta as e:
-            messagebox.showerror(APP_NOME, str(e))
-            return
-        oab, uf = var_oab.get().strip(), var_uf.get()
-        cfg.update(oab=oab, uf=uf, dias=max(0, (fim - inicio).days))
-        salvar_config(cfg)
-        btn_buscar.configure(state="disabled")
-        var_status.set("Consultando o DJEN...")
-
-        def progresso(n, total):
-            root.after(0, var_status.set, f"Consultando o DJEN... {n}" + (f" de {total}" if total else ""))
-
-        def tarefa():
+        def _corpo(self):
+            tamanho = int(self.headers.get("Content-Length") or 0)
+            if not tamanho:
+                return {}
             try:
-                pubs = buscar_publicacoes(oab, uf, inicio, fim, progresso)
-                root.after(0, concluir, pubs, None)
-            except ErroConsulta as e:
-                root.after(0, concluir, None, str(e))
-            except Exception as e:  # noqa: BLE001
-                root.after(0, concluir, None, f"Erro inesperado: {e}")
+                return json.loads(self.rfile.read(tamanho).decode("utf-8"))
+            except ValueError:
+                return {}
 
-        threading.Thread(target=tarefa, daemon=True).start()
+        def do_GET(self):
+            estado["ultimo_ping"] = time.time()
+            rota = urllib.parse.urlparse(self.path).path
+            if rota in ("/", "/index.html"):
+                with open(_recurso("ui.html"), "rb") as f:
+                    self._responder(200, f.read(), "text/html; charset=utf-8")
+            elif rota == "/api/config":
+                self._responder(200, carregar_config())
+            else:
+                self._responder(404, {"erro": "não encontrado"})
 
-    def concluir(pubs, erro):
-        btn_buscar.configure(state="normal")
-        if erro:
-            var_status.set("Erro na consulta.")
-            if messagebox.askyesno(APP_NOME, erro + "\n\nDeseja abrir a consulta no site do CNJ?"):
-                webbrowser.open(CONSULTA_WEB)
+        def do_POST(self):
+            estado["ultimo_ping"] = time.time()
+            rota = urllib.parse.urlparse(self.path).path
+            dados = self._corpo()
+            if rota == "/api/ping":
+                self._responder(200, {"ok": True})
+            elif rota == "/api/buscar":
+                try:
+                    inicio = _parse_data(str(dados.get("inicio", "")))
+                    fim = _parse_data(str(dados.get("fim", "")))
+                    oab, uf = str(dados.get("oab", "")), str(dados.get("uf", UF_PADRAO))
+                    pubs = buscar_publicacoes(oab, uf, inicio, fim)
+                    cfg = carregar_config()
+                    cfg.update(oab=re.sub(r"\D", "", oab), uf=uf.upper(), dias=max(0, (fim - inicio).days))
+                    salvar_config(cfg)
+                    lidas = carregar_lidas()
+                    for p in pubs:
+                        p["lida"] = p["id"] in lidas
+                    self._responder(200, {"publicacoes": pubs})
+                except ErroConsulta as e:
+                    self._responder(200, {"erro": str(e)})
+                except Exception as e:  # noqa: BLE001
+                    self._responder(500, {"erro": f"Erro inesperado: {e}"})
+            elif rota == "/api/lidas":
+                lidas = carregar_lidas()
+                ids = {str(i) for i in dados.get("ids", [])}
+                if dados.get("lida", True):
+                    lidas |= ids
+                else:
+                    lidas -= ids
+                salvar_lidas(lidas)
+                self._responder(200, {"ok": True})
+            else:
+                self._responder(404, {"erro": "não encontrado"})
+
+    servidor = ThreadingHTTPServer(("127.0.0.1", porta), Handler)
+    servidor.daemon_threads = True
+    return servidor, estado
+
+
+def _navegador_app():
+    """Localiza o Edge (presente em todo Windows 10/11) ou o Chrome."""
+    candidatos = []
+    for var in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            candidatos += [os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+                           os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")]
+    candidatos += ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    for c in candidatos:
+        if os.path.isfile(c):
+            return c
+    for nome in ("msedge", "microsoft-edge", "google-chrome", "chromium", "chromium-browser"):
+        caminho = shutil.which(nome)
+        if caminho:
+            return caminho
+    return None
+
+
+def iniciar_gui():
+    servidor, estado = criar_servidor()
+    url = f"http://127.0.0.1:{servidor.server_address[1]}/"
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+
+    navegador = _navegador_app()
+    processo = None
+    if navegador:
+        perfil = os.path.join(pasta_dados(), "janela")
+        try:
+            processo = subprocess.Popen([
+                navegador, f"--app={url}", f"--user-data-dir={perfil}",
+                "--window-size=1320,840", "--no-first-run", "--no-default-browser-check",
+                "--disable-features=Translate",
+            ])
+        except OSError:
+            processo = None
+    if processo is None:
+        webbrowser.open(url)
+
+    inicio = time.time()
+    if processo is not None:
+        processo.wait()
+        # com perfil próprio, o processo só termina quando a janela é fechada
+        if time.time() - inicio > 5:
+            servidor.shutdown()
             return
-        estado["pubs"] = pubs
-        aplicar_filtro()
-        if not pubs:
-            var_status.set("Nenhuma publicação encontrada no período.")
-
-    btn_buscar.configure(command=buscar)
-    root.bind("<Return>", lambda _: buscar())
-    root.after(300, buscar)  # já busca ao abrir
-    root.mainloop()
+    # fallback: encerra quando a página deixa de dar sinal de vida
+    while time.time() - estado["ultimo_ping"] < 120:
+        time.sleep(5)
+    servidor.shutdown()
 
 
 # --------------------------------------------------------------------------

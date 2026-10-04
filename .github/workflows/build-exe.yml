@@ -19,7 +19,7 @@ jobs:
       - name: Instalar PyInstaller
         run: pip install pyinstaller
       - name: Gerar .exe
-        run: pyinstaller --onefile --windowed --name BuscadorPublicacoesOAB buscador_publicacoes.py
+        run: pyinstaller --onefile --windowed --name BuscadorPublicacoesOAB --add-data "ui.html;." buscador_publicacoes.py
       - name: Disponibilizar como artefato
         uses: actions/upload-artifact@v4
         with:
